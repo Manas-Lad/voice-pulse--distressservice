@@ -63,9 +63,6 @@ class DistressDetectionService : AccessibilityService() {
     // -----------------------------
     // Emergency configuration
     // -----------------------------
-
-    private val emergencyPhone = "+919819933448"
-
     private val serverUrl =
         "https://voice-pulse-backend.onrender.com/api/alerts"
 
@@ -648,162 +645,91 @@ class DistressDetectionService : AccessibilityService() {
         score: Double,
         signals: List<String>
     ) {
+        Log.w(TAG, "EMERGENCY DETECTED! Composite Score: $score | Triggers: $signals")
 
-        Log.w(
-            TAG,
-            "EMERGENCY DETECTED!"
-        )
+        val prefs = applicationContext.getSharedPreferences("VoicePulsePrefs", Context.MODE_PRIVATE)
+        val deviceUuid = prefs.getString("device_uuid", "UNKNOWN_DEVICE") ?: "UNKNOWN_DEVICE"
 
-        Log.w(
-            TAG,
-            "Composite Score: $score"
-        )
-
-        Log.w(
-            TAG,
-            "Triggers: $signals"
-        )
-
-        // --------------------------------------------------------
-        // SMS
-        // --------------------------------------------------------
-
-        try {
-
-            val smsManager =
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-
-                    applicationContext.getSystemService(
-                        SmsManager::class.java
-                    )
-
-                } else {
-
-                    @Suppress("DEPRECATION")
-                    SmsManager.getDefault()
-                }
-
-            val alertMessage =
-                "SOS: Distress detected. " +
-                        "Triggers: ${signals.joinToString(", ")}"
-
-            smsManager.sendTextMessage(
-                emergencyPhone,
-                null,
-                alertMessage,
-                null,
-                null
-            )
-
-            Log.d(
-                TAG,
-                "Emergency SMS dispatched directly via cellular baseband."
-            )
-
-        } catch (e: Exception) {
-
-            Log.e(
-                TAG,
-                "Failed to send SMS: ${e.message}"
-            )
-        }
-
-        // --------------------------------------------------------
-        // Backend
-        // --------------------------------------------------------
+        val alertMessage = "SOS: Distress detected by VoicePulse. Triggers: ${signals.joinToString(", ")}"
 
         thread {
+            // ----------------------------------------------------
+            // 1. Fetch only saved emergency contacts from database
+            // ----------------------------------------------------
+            val phoneNumbersToSend = mutableListOf<String>()
 
             try {
+                val userUrl = URL("https://voice-pulse-backend.onrender.com/api/users/device/$deviceUuid")
+                val userConn = userUrl.openConnection() as HttpURLConnection
+                userConn.requestMethod = "GET"
+                userConn.connectTimeout = 4000
+                userConn.readTimeout = 4000
 
-                val url =
-                    URL(serverUrl)
+                if (userConn.responseCode in 200..299) {
+                    val responseText = userConn.inputStream.bufferedReader().use { it.readText() }
+                    val userObj = JSONObject(responseText)
 
-                val conn =
-                    url.openConnection()
-                            as HttpURLConnection
-
-                conn.requestMethod = "POST"
-
-                conn.setRequestProperty(
-                    "Content-Type",
-                    "application/json"
-                )
-
-                conn.doOutput = true
-
-                conn.connectTimeout = 3000
-
-                //  NEW (Bound to this device's registered UUID)
-                val prefs = applicationContext.getSharedPreferences("VoicePulsePrefs", Context.MODE_PRIVATE)
-                val deviceUuid = prefs.getString("device_uuid", "UNKNOWN_DEVICE")
-
-                val payload =
-                    JSONObject().apply {
-
-                        put(
-                            "deviceUuid",
-                            deviceUuid
-                        )
-
-                        put(
-                            "timestamp",
-                            System.currentTimeMillis()
-                        )
-
-                        put(
-                            "score",
-                            score
-                        )
-
-                        put(
-                            "signals",
-                            JSONArray(signals)
-                        )
+                    // Check primary phone number if present
+                    val primaryPhone = userObj.optString("phoneNumber", "").trim()
+                    if (primaryPhone.isNotEmpty() && !primaryPhone.equals("null", ignoreCase = true)) {
+                        phoneNumbersToSend.add(primaryPhone)
                     }
 
-                OutputStreamWriter(
-                    conn.outputStream
-                ).use { writer ->
-
-                    writer.write(
-                        payload.toString()
-                    )
-
-                    writer.flush()
+                    // Check emergencyContacts array if present
+                    if (userObj.has("emergencyContacts")) {
+                        val contactsArray = userObj.getJSONArray("emergencyContacts")
+                        for (i in 0 until contactsArray.length()) {
+                            val contact = contactsArray.getJSONObject(i)
+                            val phone = contact.optString("phoneNumber", "").trim()
+                            if (phone.isNotEmpty() && !phone.equals("null", ignoreCase = true) && !phoneNumbersToSend.contains(phone)) {
+                                phoneNumbersToSend.add(phone)
+                            }
+                        }
+                    }
                 }
-
-                val responseCode =
-                    conn.responseCode
-
-                Log.d(
-                    TAG,
-                    "Spring Boot Server Response: $responseCode"
-                )
-
-                conn.disconnect()
-
+                userConn.disconnect()
             } catch (e: Exception) {
-
-                Log.e(
-                    TAG,
-                    "Failed to send HTTP alert: ${e.message}"
-                )
+                Log.e(TAG, "Error fetching database contacts: ${e.message}")
             }
-        }
 
-        // Inside dispatchDistressAlert(score: Double, signals: List<String>):
-        thread {
+            // ----------------------------------------------------
+            // 2. Dispatch SMS ONLY if database numbers exist
+            // ----------------------------------------------------
+            if (phoneNumbersToSend.isNotEmpty()) {
+                try {
+                    val smsManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        applicationContext.getSystemService(SmsManager::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        SmsManager.getDefault()
+                    }
+
+                    for (phone in phoneNumbersToSend) {
+                        try {
+                            smsManager.sendTextMessage(phone, null, alertMessage, null, null)
+                            Log.d(TAG, "Emergency SMS successfully sent to database contact: $phone")
+                        } catch (smsEx: Exception) {
+                            Log.e(TAG, "Failed sending SMS to $phone: ${smsEx.message}")
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "SMS Manager failed: ${e.message}")
+                }
+            } else {
+                Log.w(TAG, "No contacts found in database. Skipping SMS transmission.")
+            }
+
+            // ----------------------------------------------------
+            // 3. Dispatch alert record to Spring Boot backend
+            // ----------------------------------------------------
             try {
-                val prefs = applicationContext.getSharedPreferences("VoicePulsePrefs", Context.MODE_PRIVATE)
-                val deviceUuid = prefs.getString("device_uuid", "UNKNOWN_DEVICE")
-
                 val url = URL(serverUrl)
                 val conn = url.openConnection() as HttpURLConnection
                 conn.requestMethod = "POST"
                 conn.setRequestProperty("Content-Type", "application/json")
                 conn.doOutput = true
-                conn.connectTimeout = 3000
+                conn.connectTimeout = 4000
+                conn.readTimeout = 4000
 
                 val payload = JSONObject().apply {
                     put("deviceUuid", deviceUuid)
@@ -818,10 +744,10 @@ class DistressDetectionService : AccessibilityService() {
                 }
 
                 val responseCode = conn.responseCode
-                Log.d(TAG, "Spring Boot Server Response: $responseCode")
+                Log.d(TAG, "Server alert ingestion code: $responseCode")
                 conn.disconnect()
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to send HTTP alert: ${e.message}")
+                Log.e(TAG, "Failed to submit HTTP alert: ${e.message}")
             }
         }
     }
