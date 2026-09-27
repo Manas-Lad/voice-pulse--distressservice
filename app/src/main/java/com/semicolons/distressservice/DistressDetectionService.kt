@@ -734,12 +734,16 @@ class DistressDetectionService : AccessibilityService() {
 
                 conn.connectTimeout = 3000
 
+                //  NEW (Bound to this device's registered UUID)
+                val prefs = applicationContext.getSharedPreferences("VoicePulsePrefs", Context.MODE_PRIVATE)
+                val deviceUuid = prefs.getString("device_uuid", "UNKNOWN_DEVICE")
+
                 val payload =
                     JSONObject().apply {
 
                         put(
-                            "userId",
-                            1
+                            "deviceUuid",
+                            deviceUuid
                         )
 
                         put(
@@ -785,6 +789,39 @@ class DistressDetectionService : AccessibilityService() {
                     TAG,
                     "Failed to send HTTP alert: ${e.message}"
                 )
+            }
+        }
+
+        // Inside dispatchDistressAlert(score: Double, signals: List<String>):
+        thread {
+            try {
+                val prefs = applicationContext.getSharedPreferences("VoicePulsePrefs", Context.MODE_PRIVATE)
+                val deviceUuid = prefs.getString("device_uuid", "UNKNOWN_DEVICE")
+
+                val url = URL(serverUrl)
+                val conn = url.openConnection() as HttpURLConnection
+                conn.requestMethod = "POST"
+                conn.setRequestProperty("Content-Type", "application/json")
+                conn.doOutput = true
+                conn.connectTimeout = 3000
+
+                val payload = JSONObject().apply {
+                    put("deviceUuid", deviceUuid)
+                    put("timestamp", System.currentTimeMillis())
+                    put("score", score)
+                    put("signals", JSONArray(signals))
+                }
+
+                OutputStreamWriter(conn.outputStream).use { writer ->
+                    writer.write(payload.toString())
+                    writer.flush()
+                }
+
+                val responseCode = conn.responseCode
+                Log.d(TAG, "Spring Boot Server Response: $responseCode")
+                conn.disconnect()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send HTTP alert: ${e.message}")
             }
         }
     }
