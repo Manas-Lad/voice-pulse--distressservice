@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.util.Log
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -71,13 +72,25 @@ class MainActivity : AppCompatActivity() {
         try {
             ContextCompat.startForegroundService(this, serviceIntent)
         } catch (e: Exception) {
-            startService(serviceIntent)
+            try {
+                startService(serviceIntent)
+            } catch (ex: Exception) {
+                Log.e("MainActivity", "Failed to start distress service", ex)
+            }
         }
 
-        // Redirect user to the Vercel Dashboard carrying their identity token
-        val dashboardUrl = "https://voicepulse.vercel.app/dashboard?deviceToken=$deviceUuid"
-        val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(dashboardUrl))
-        startActivity(browserIntent)
+        // Redirect user to the Vercel site carrying their device token
+        // Hitting root with ?deviceToken ensures the root router handles entry cleanly
+        val dashboardUrl = "https://voicepulse.vercel.app/?deviceToken=$deviceUuid"
+        try {
+            val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(dashboardUrl)).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(browserIntent)
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Unable to open browser", e)
+        }
+
         finish()
     }
 
@@ -87,8 +100,8 @@ class MainActivity : AppCompatActivity() {
             val conn = url.openConnection() as HttpURLConnection
             conn.requestMethod = "POST"
             conn.setRequestProperty("Content-Type", "application/json")
-            conn.connectTimeout = 5000
-            conn.readTimeout = 5000
+            conn.connectTimeout = 7000
+            conn.readTimeout = 7000
             conn.doOutput = true
 
             val payload = JSONObject().apply {
@@ -99,10 +112,12 @@ class MainActivity : AppCompatActivity() {
                 writer.write(payload.toString())
                 writer.flush()
             }
-            conn.responseCode
+
+            val responseCode = conn.responseCode
+            Log.d("MainActivity", "Device registration response: $responseCode")
             conn.disconnect()
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e("MainActivity", "Error registering device on server", e)
         }
     }
 }
