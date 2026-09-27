@@ -13,11 +13,11 @@
 
     <LinearLayout
         android:id="@+id/contentContainer"
-        android:layout_width="match_parent"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:orientation="vertical"
         android:gravity="center_horizontal"
-        android:padding="24dp"
+        android:padding="16dp"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
@@ -28,7 +28,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="Emergency Alert System"
-            android:textSize="26sp"
+            android:textSize="24sp"
             android:textStyle="bold"
             android:gravity="center"
             android:textAlignment="center" />
@@ -37,22 +37,36 @@
             android:id="@+id/subtitleText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
+            android:layout_marginTop="10dp"
             android:text="Configure your emergency protection system"
-            android:textSize="15sp"
+            android:textSize="14sp"
             android:gravity="center"
             android:textAlignment="center"
             android:alpha="0.7" />
 
         <Button
             android:id="@+id/btnAccessibility"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
+            android:layout_width="match_parent"
+            android:layout_height="54dp"
             android:layout_marginTop="32dp"
-            android:minHeight="48dp"
-            android:paddingStart="24dp"
-            android:paddingEnd="24dp"
-            android:text="Enable Accessibility Service" />
+            android:text="Enable Accessibility Service"
+            android:textColor="#1E1B4B"
+            android:textSize="15sp"
+            android:textStyle="bold"
+            android:backgroundTint="#C7D2FE"
+            app:cornerRadius="27dp" />
+
+        <Button
+            android:id="@+id/btnOpenDashboard"
+            android:layout_width="match_parent"
+            android:layout_height="54dp"
+            android:layout_marginTop="16dp"
+            android:text="Open Web Dashboard"
+            android:textColor="#1E1B4B"
+            android:textSize="15sp"
+            android:textStyle="bold"
+            android:backgroundTint="#C7D2FE"
+            app:cornerRadius="27dp" />
 
     </LinearLayout>
 
