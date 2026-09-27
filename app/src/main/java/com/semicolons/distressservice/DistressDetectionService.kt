@@ -67,7 +67,7 @@ class DistressDetectionService : AccessibilityService() {
     private val emergencyPhone = "+919819933448"
 
     private val serverUrl =
-        "http://192.168.0.69:8080/api/alerts"
+        "https://voice-pulse-backend.onrender.com/api/alerts"
 
     // -----------------------------
     // Telephony
