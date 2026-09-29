@@ -1,7 +1,10 @@
 package com.semicolons.distressservice
 
 import android.accessibilityservice.AccessibilityService
+import android.annotation.SuppressLint
 import android.content.Context
+import android.location.Location
+import android.location.LocationManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
@@ -43,7 +46,10 @@ class DistressDetectionService : AccessibilityService() {
 
     private var voskKeywordDetector: VoskKeywordDetector? = null
 
+    private val dynamicCustomCodes = mutableListOf<String>()
+
     private val serverUrl = "https://voice-pulse-backend.onrender.com/api/alerts"
+    private val frontendBaseUrl = "https://voice-pulse--frontend.vercel.app/dashboard"
 
     private var telephonyManager: TelephonyManager? = null
     private var telephonyCallback: Any? = null
@@ -53,6 +59,36 @@ class DistressDetectionService : AccessibilityService() {
         super.onServiceConnected()
         Log.d(TAG, "Distress Safety Service Connected & Standing By.")
         registerCallStateListener()
+        fetchCustomSecretCodes()
+    }
+
+    private fun fetchCustomSecretCodes() {
+        thread {
+            try {
+                val prefs = applicationContext.getSharedPreferences("VoicePulsePrefs", Context.MODE_PRIVATE)
+                val deviceUuid = prefs.getString("device_uuid", null) ?: return@thread
+                val endpoint = URL("https://voice-pulse-backend.onrender.com/api/users/device/$deviceUuid/codes")
+                val conn = endpoint.openConnection() as HttpURLConnection
+                conn.requestMethod = "GET"
+                conn.connectTimeout = 6000
+                conn.readTimeout = 6000
+
+                if (conn.responseCode in 200..299) {
+                    val response = conn.inputStream.bufferedReader().use { it.readText() }
+                    val array = JSONArray(response)
+                    synchronized(dynamicCustomCodes) {
+                        dynamicCustomCodes.clear()
+                        for (i in 0 until array.length()) {
+                            dynamicCustomCodes.add(array.getString(i).trim().lowercase())
+                        }
+                    }
+                    Log.d(TAG, "Fetched ${dynamicCustomCodes.size} custom code words from database: $dynamicCustomCodes")
+                }
+                conn.disconnect()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed fetching custom codes: ${e.message}")
+            }
+        }
     }
 
     private fun registerCallStateListener() {
@@ -84,6 +120,7 @@ class DistressDetectionService : AccessibilityService() {
         when (state) {
             TelephonyManager.CALL_STATE_OFFHOOK -> {
                 Log.d(TAG, "Call Connected (OFFHOOK)! Starting microphone capture loop.")
+                fetchCustomSecretCodes()
                 startMonitoring()
             }
             TelephonyManager.CALL_STATE_IDLE -> {
@@ -93,7 +130,7 @@ class DistressDetectionService : AccessibilityService() {
         }
     }
 
-    @android.annotation.SuppressLint("MissingPermission")
+    @SuppressLint("MissingPermission")
     private fun startMonitoring() {
         if (isRecording) return
 
@@ -156,8 +193,18 @@ class DistressDetectionService : AccessibilityService() {
         if (sosTriggered) return
 
         val codeWordDetected = voskKeywordDetector?.processAudio(buffer, readSize) == true
-        if (codeWordDetected) {
-            val finalSignals = (observedEvents + "CODE_WORD").toList()
+        val voskText = voskKeywordDetector?.getLatestHypothesis()?.lowercase() ?: ""
+
+        var customMatched = false
+        synchronized(dynamicCustomCodes) {
+            if (dynamicCustomCodes.isNotEmpty() && voskText.isNotEmpty()) {
+                customMatched = dynamicCustomCodes.any { code -> voskText.contains(code) }
+            }
+        }
+
+        if (codeWordDetected || customMatched) {
+            val triggerLabel = if (customMatched) "CUSTOM_SECRET_CODE" else "CODE_WORD"
+            val finalSignals = (observedEvents + triggerLabel).toList()
             sosTriggered = true
             dispatchDistressAlert(score = 1.0, signals = finalSignals)
             stopMonitoring()
@@ -215,18 +262,37 @@ class DistressDetectionService : AccessibilityService() {
         }
     }
 
+    @SuppressLint("MissingPermission")
+    private fun getBestLastKnownLocation(): Location? {
+        return try {
+            val locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+            val providers = locationManager.getProviders(true)
+            var bestLocation: Location? = null
+
+            for (provider in providers) {
+                val l = locationManager.getLastKnownLocation(provider) ?: continue
+                if (bestLocation == null || l.accuracy < bestLocation.accuracy) {
+                    bestLocation = l
+                }
+            }
+            bestLocation
+        } catch (e: Exception) {
+            Log.w(TAG, "Unable to obtain device location: ${e.message}")
+            null
+        }
+    }
+
     private fun dispatchDistressAlert(score: Double, signals: List<String>) {
         Log.w(TAG, "EMERGENCY DETECTED! Composite Score: $score | Triggers: $signals")
 
         val prefs = applicationContext.getSharedPreferences("VoicePulsePrefs", Context.MODE_PRIVATE)
         val deviceUuid = prefs.getString("device_uuid", "UNKNOWN_DEVICE") ?: "UNKNOWN_DEVICE"
-        val alertMessage = "SOS: Distress detected by VoicePulse. Triggers: ${signals.joinToString(", ")}"
+        val location = getBestLastKnownLocation()
 
         thread {
-
             val phoneNumbersToSend = mutableListOf<String>()
 
-            // 1. Fetch saved contacts directly from ContactController (/api/contacts)
+            // 1. Fetch Emergency Contacts
             try {
                 val contactsEndpoint = URL("https://voice-pulse-backend.onrender.com/api/contacts")
                 val conn = contactsEndpoint.openConnection() as HttpURLConnection
@@ -240,8 +306,6 @@ class DistressDetectionService : AccessibilityService() {
 
                     for (i in 0 until contactsArray.length()) {
                         val obj = contactsArray.getJSONObject(i)
-
-                        // Contact entity uses .getPhone(), with fallback to phoneNumber
                         var phone = obj.optString("phone", "").trim()
                         if (phone.isEmpty()) {
                             phone = obj.optString("phoneNumber", "").trim()
@@ -264,7 +328,56 @@ class DistressDetectionService : AccessibilityService() {
                 Log.e(TAG, "Error fetching database contacts: ${e.message}")
             }
 
-            // 2. Dispatch SMS ONLY if database numbers exist
+            // 2. Submit Alert to Backend with Location and Receive shareToken
+            var shareToken: String? = null
+            try {
+                val url = URL(serverUrl)
+                val conn = url.openConnection() as HttpURLConnection
+                conn.requestMethod = "POST"
+                conn.setRequestProperty("Content-Type", "application/json")
+                conn.doOutput = true
+                conn.connectTimeout = 8000
+                conn.readTimeout = 8000
+
+                val payload = JSONObject().apply {
+                    put("deviceUuid", deviceUuid)
+                    put("timestamp", System.currentTimeMillis())
+                    put("score", score)
+                    put("signals", JSONArray(signals))
+                    if (location != null) {
+                        put("latitude", location.latitude)
+                        put("longitude", location.longitude)
+                        put("locationAccuracy", location.accuracy)
+                    }
+                }
+
+                OutputStreamWriter(conn.outputStream).use { writer ->
+                    writer.write(payload.toString())
+                    writer.flush()
+                }
+
+                val responseCode = conn.responseCode
+                Log.d(TAG, "Server alert ingestion code: $responseCode")
+
+                if (responseCode in 200..299) {
+                    val responseStr = conn.inputStream.bufferedReader().use { it.readText() }
+                    val resJson = JSONObject(responseStr)
+                    shareToken = resJson.optString("shareToken", null)
+                }
+                conn.disconnect()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to submit HTTP alert: ${e.message}")
+            }
+
+            // 3. Build SMS URL with deviceToken and alertToken, then Dispatch SMS
+            val dashboardUrl = if (!shareToken.isNullOrEmpty()) {
+                "$frontendBaseUrl/?deviceToken=$deviceUuid&alertToken=$shareToken"
+            } else {
+                "$frontendBaseUrl/?deviceToken=$deviceUuid"
+            }
+
+            val alertMessage = "EMERGENCY: Distress detected by VoicePulse! Triggers: ${signals.joinToString(", ")}. View live dashboard & location: $dashboardUrl"
+
             if (phoneNumbersToSend.isNotEmpty()) {
                 try {
                     val smsManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -287,35 +400,6 @@ class DistressDetectionService : AccessibilityService() {
                 }
             } else {
                 Log.w(TAG, "No contacts found in database. Skipping SMS transmission.")
-            }
-
-            // 3. Dispatch alert record to Spring Boot backend
-            try {
-                val url = URL(serverUrl)
-                val conn = url.openConnection() as HttpURLConnection
-                conn.requestMethod = "POST"
-                conn.setRequestProperty("Content-Type", "application/json")
-                conn.doOutput = true
-                conn.connectTimeout = 8000
-                conn.readTimeout = 8000
-
-                val payload = JSONObject().apply {
-                    put("deviceUuid", deviceUuid)
-                    put("timestamp", System.currentTimeMillis())
-                    put("score", score)
-                    put("signals", JSONArray(signals))
-                }
-
-                OutputStreamWriter(conn.outputStream).use { writer ->
-                    writer.write(payload.toString())
-                    writer.flush()
-                }
-
-                val responseCode = conn.responseCode
-                Log.d(TAG, "Server alert ingestion code: $responseCode")
-                conn.disconnect()
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to submit HTTP alert: ${e.message}")
             }
         }
     }

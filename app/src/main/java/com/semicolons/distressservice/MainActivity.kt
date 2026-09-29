@@ -41,11 +41,10 @@ class MainActivity : AppCompatActivity() {
             startActivity(intent)
             Toast.makeText(this, "Enable VoicePulse under Downloaded Apps", Toast.LENGTH_LONG).show()
         }
-1
         // 4. Button 2: Explicitly redirects to the web dashboard
         val btnOpenDashboard = findViewById<Button>(R.id.btnOpenDashboard)
         btnOpenDashboard.setOnClickListener {
-            val dashboardUrl = "https://voice-pulse-frontend.vercel.app/?deviceToken=$deviceUuid"
+            val dashboardUrl = "https://voice-pulse-frontend.vercel.app/dashboard/?deviceToken=$deviceUuid"
             val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(dashboardUrl))
             startActivity(browserIntent)
         }
@@ -56,7 +55,9 @@ class MainActivity : AppCompatActivity() {
             Manifest.permission.RECORD_AUDIO,
             Manifest.permission.SEND_SMS,
             Manifest.permission.RECEIVE_SMS,
-            Manifest.permission.READ_PHONE_STATE
+            Manifest.permission.READ_PHONE_STATE,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION
         )
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
