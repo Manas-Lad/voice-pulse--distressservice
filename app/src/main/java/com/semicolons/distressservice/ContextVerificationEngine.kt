@@ -17,7 +17,7 @@ class ContextVerificationEngine(private val context: Context) {
 
         // Acoustic Threshold Adjustments
         private const val ABNORMAL_SILENCE_THRESHOLD_MS = 1500.0 // 1.5 seconds of dead air prior to trigger
-        private const val SILENCE_SENSITIVITY_BOOST = 0.05f       // Lowers similarity bar if an abnormal pause is detected
+        private const val SILENCE_SENSITIVITY_BOOST = 0.0125f       // Lowers similarity bar if an abnormal pause is detected
     }
 
     private var textEmbedder: TextEmbedder? = null
