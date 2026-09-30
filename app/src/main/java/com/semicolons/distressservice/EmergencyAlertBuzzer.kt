@@ -29,9 +29,9 @@ object EmergencyAlertBuzzer {
         val sampleRate = 44100
         val beepFrequency1 = 853.0
         val beepFrequency2 = 960.0
-        val beepDuration = 0.45
-        val pauseDuration = 0.20
-        val amplitude = 0.85
+        val beepDuration = 1
+        val pauseDuration = 0.5
+        val amplitude = 1
 
         val totalSamples = (sampleRate * durationSeconds).toInt()
         val pcmData = ShortArray(totalSamples)
@@ -96,9 +96,11 @@ object EmergencyAlertBuzzer {
                 Log.w(TAG, "Could not adjust alarm volume: ${e.message}")
             }
 
-            Log.w(TAG, "Playing emergency tone...")
-            audioTrack.play()
-            Thread.sleep((durationSeconds * 1000).toLong())
+            for(i in 0 until 5) {
+                Log.w(TAG, "Playing emergency tone...")
+                audioTrack.play()
+                Thread.sleep((durationSeconds * 1000).toLong())
+            }
 
         } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()

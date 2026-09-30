@@ -49,14 +49,10 @@ class AudioEnhancementManager {
     }
 
     /**
-     * Fast in-place normalization fallback for ShortArray PCM buffers
+     * Pass-through without digital gain multiplication to avoid clipping /s/ and /p/ phonemes.
      */
-    fun boostPcmAudioBuffer(buffer: ShortArray, readSamples: Int, boostFactor: Float = 1.25f) {
-        val count = readSamples.coerceAtMost(buffer.size)
-        for (i in 0 until count) {
-            val sample = buffer[i].toInt()
-            buffer[i] = (sample * boostFactor).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
-        }
+    fun boostPcmAudioBuffer(buffer: ShortArray, readSamples: Int) {
+        // Intentionally left untouched to preserve acoustic waveform fidelity for Vosk
     }
 
     fun release() {
