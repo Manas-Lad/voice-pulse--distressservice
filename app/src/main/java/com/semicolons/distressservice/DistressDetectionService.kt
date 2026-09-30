@@ -3,335 +3,220 @@ package com.semicolons.distressservice
 import android.accessibilityservice.AccessibilityService
 import android.annotation.SuppressLint
 import android.content.Context
-import android.location.Location
-import android.location.LocationManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Build
 import android.telephony.PhoneStateListener
 import android.telephony.SmsManager
-import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.BufferedReader
+import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.concurrent.thread
-import kotlin.math.sqrt
 
+@Suppress("DEPRECATION")
 class DistressDetectionService : AccessibilityService() {
 
-    private val TAG = "DistressService"
+    companion object {
+        private const val TAG = "DistressService"
+        private const val SAMPLE_RATE = 16000
+        private const val BACKEND_URL = "https://voice-pulse-backend.onrender.com"
+        private const val PREFS_NAME = "VoicePulsePrefs"
+        private const val KEY_DEVICE_UUID = "device_uuid"
+    }
 
-    private var isRecording = false
     private var audioRecord: AudioRecord? = null
+    private var isRecording = false
+    private var recordingThread: Thread? = null
 
-    private val sampleRate = 16000
-    private val frameSize = 800
-
-    private var consecutiveStressFrames = 0
-    private val stressThresholdFrames = 15
-
-    private var consecutiveSilenceFrames = 0
-    private val silenceThresholdFrames = 300
-
-    private var logThrottle = 0
-
-    private val observedEvents = mutableSetOf<String>()
-    private var sosTriggered = false
-
-    private var voskKeywordDetector: VoskKeywordDetector? = null
-
-    private val dynamicCustomCodes = mutableListOf<String>()
-
-    private val serverUrl = "https://voice-pulse-backend.onrender.com/api/alerts"
-    private val frontendBaseUrl = "https://voice-pulse--frontend.vercel.app/dashboard"
+    private lateinit var audioEnhanceManager: AudioEnhancementManager
+    private lateinit var voskDetector: VoskKeywordDetector
+    private lateinit var contextEngine: ContextVerificationEngine
 
     private var telephonyManager: TelephonyManager? = null
-    private var telephonyCallback: Any? = null
-    private var legacyPhoneStateListener: PhoneStateListener? = null
+    private var phoneStateListener: PhoneStateListener? = null
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        Log.d(TAG, "Distress Safety Service Connected & Standing By.")
-        registerCallStateListener()
-        fetchCustomSecretCodes()
+        Log.i(TAG, "DistressDetectionService connected.")
+
+        audioEnhanceManager = AudioEnhancementManager()
+        voskDetector = VoskKeywordDetector(applicationContext)
+        contextEngine = ContextVerificationEngine(applicationContext)
+
+        thread(start = true, name = "ModelInitThread") {
+            voskDetector.initialize()
+            fetchCustomSecretCodes()
+        }
+
+        registerCallListener()
     }
 
-    private fun fetchCustomSecretCodes() {
-        thread {
-            try {
-                val prefs = applicationContext.getSharedPreferences("VoicePulsePrefs", Context.MODE_PRIVATE)
-                val deviceUuid = prefs.getString("device_uuid", null) ?: return@thread
-                val endpoint = URL("https://voice-pulse-backend.onrender.com/api/users/device/$deviceUuid/codes")
-                val conn = endpoint.openConnection() as HttpURLConnection
-                conn.requestMethod = "GET"
-                conn.connectTimeout = 6000
-                conn.readTimeout = 6000
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
 
-                if (conn.responseCode in 200..299) {
-                    val response = conn.inputStream.bufferedReader().use { it.readText() }
-                    val array = JSONArray(response)
-                    synchronized(dynamicCustomCodes) {
-                        dynamicCustomCodes.clear()
-                        for (i in 0 until array.length()) {
-                            dynamicCustomCodes.add(array.getString(i).trim().lowercase())
-                        }
+    override fun onInterrupt() {
+        Log.w(TAG, "Service onInterrupt called.")
+    }
+
+    private fun registerCallListener() {
+        telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
+
+        phoneStateListener = object : PhoneStateListener() {
+            @Deprecated("Deprecated in Java")
+            override fun onCallStateChanged(state: Int, phoneNumber: String?) {
+                when (state) {
+                    TelephonyManager.CALL_STATE_OFFHOOK -> {
+                        Log.i(TAG, "Active call detected (OFFHOOK). Starting audio listener.")
+                        startAudioCapture()
                     }
-                    Log.d(TAG, "Fetched ${dynamicCustomCodes.size} custom code words from database: $dynamicCustomCodes")
+                    TelephonyManager.CALL_STATE_IDLE -> {
+                        Log.i(TAG, "Call ended or idle. Halting audio listener.")
+                        stopAudioCapture()
+                    }
+                    TelephonyManager.CALL_STATE_RINGING -> {
+                        Log.d(TAG, "Device ringing.")
+                    }
                 }
-                conn.disconnect()
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed fetching custom codes: ${e.message}")
             }
         }
-    }
 
-    private fun registerCallStateListener() {
-        telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val callback = object : TelephonyCallback(), TelephonyCallback.CallStateListener {
-                override fun onCallStateChanged(state: Int) {
-                    handleCallState(state)
-                }
-            }
-            telephonyCallback = callback
-            telephonyManager?.registerTelephonyCallback(mainExecutor, callback)
-        } else {
-            @Suppress("DEPRECATION")
-            val listener = object : PhoneStateListener() {
-                @Deprecated("Deprecated in Java")
-                override fun onCallStateChanged(state: Int, phoneNumber: String?) {
-                    handleCallState(state)
-                }
-            }
-            legacyPhoneStateListener = listener
-            @Suppress("DEPRECATION")
-            telephonyManager?.listen(listener, PhoneStateListener.LISTEN_CALL_STATE)
-        }
-    }
-
-    private fun handleCallState(state: Int) {
-        when (state) {
-            TelephonyManager.CALL_STATE_OFFHOOK -> {
-                Log.d(TAG, "Call Connected (OFFHOOK)! Starting microphone capture loop.")
-                fetchCustomSecretCodes()
-                startMonitoring()
-            }
-            TelephonyManager.CALL_STATE_IDLE -> {
-                Log.d(TAG, "Call Ended (IDLE). Stopping Monitoring.")
-                stopMonitoring()
-            }
+        try {
+            telephonyManager?.listen(phoneStateListener, PhoneStateListener.LISTEN_CALL_STATE)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to register call listener: ${e.message}", e)
         }
     }
 
     @SuppressLint("MissingPermission")
-    private fun startMonitoring() {
+    @Synchronized
+    private fun startAudioCapture() {
         if (isRecording) return
 
-        isRecording = true
-        consecutiveSilenceFrames = 0
-        consecutiveStressFrames = 0
-        logThrottle = 0
-        observedEvents.clear()
-        sosTriggered = false
-
-        val minBufSize = AudioRecord.getMinBufferSize(
-            sampleRate,
+        val minBufferSize = AudioRecord.getMinBufferSize(
+            SAMPLE_RATE,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT
         )
-        val bufferCapacity = maxOf(minBufSize, frameSize * 2)
+        val bufferSize = minBufferSize.coerceAtLeast(SAMPLE_RATE * 2)
 
         try {
-            val audioManager = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
-            audioManager.mode = android.media.AudioManager.MODE_IN_COMMUNICATION
-
             audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                sampleRate,
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                SAMPLE_RATE,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
-                bufferCapacity
+                bufferSize
             )
-            audioRecord?.startRecording()
-            Log.d(TAG, "AudioRecord started successfully.")
-        } catch (e: Exception) {
-            Log.e(TAG, "AudioRecord initialization error: ${e.message}")
-            isRecording = false
-            return
-        }
 
-        thread {
-            Thread.sleep(9000)
-
-            try {
-                voskKeywordDetector = VoskKeywordDetector(applicationContext)
-                voskKeywordDetector?.initialize()
-            } catch (e: Exception) {
-                Log.e(TAG, "Vosk initialization failed", e)
+            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+                Log.e(TAG, "AudioRecord could not initialize.")
+                return
             }
 
-            val audioBuffer = ShortArray(frameSize)
-            while (isRecording) {
-                val read = audioRecord?.read(audioBuffer, 0, frameSize) ?: 0
-                if (read > 0) {
-                    processAudioChunk(audioBuffer, read)
-                } else {
-                    Thread.sleep(100)
+            audioRecord?.let { audioEnhanceManager.attachHardwareEffects(it) }
+            audioRecord?.startRecording()
+            isRecording = true
+
+            recordingThread = thread(start = true, name = "AudioProcessingWorker") {
+                processAudioStream(bufferSize)
+            }
+
+            Log.i(TAG, "Audio capture pipeline active.")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start AudioRecord: ${e.message}", e)
+        }
+    }
+
+    private fun processAudioStream(bufferSize: Int) {
+        val audioBuffer = ShortArray(bufferSize / 2)
+
+        while (isRecording && !Thread.currentThread().isInterrupted) {
+            val record = audioRecord ?: break
+            val readSamples = record.read(audioBuffer, 0, audioBuffer.size)
+
+            if (readSamples > 0) {
+                audioEnhanceManager.boostPcmAudioBuffer(audioBuffer, readSamples)
+
+                val result = voskDetector.processAudio(audioBuffer, readSamples)
+
+                if (result.triggered) {
+                    Log.w(TAG, "Keyword recognized: \"${result.matchedWord}\" in sentence: \"${result.fullSentence}\"")
+
+                    val isAuthenticDistress = contextEngine.evaluateSentence(
+                        recognizedSentence = result.fullSentence,
+                        matchedCodeword = result.matchedWord
+                    )
+
+                    if (isAuthenticDistress) {
+                        Log.e(TAG, "AUTHENTIC DISTRESS CONFIRMED. Dispatching emergency alerts.")
+                        triggerEmergencyAlert(result.matchedWord, result.fullSentence)
+                    } else {
+                        Log.i(TAG, "Keyword suppressed as benign contextual conversation.")
+                    }
+                } else if (result.fullSentence.isNotEmpty()) {
+                    contextEngine.recordNormalSentence(result.fullSentence)
                 }
             }
         }
     }
 
-    private fun processAudioChunk(buffer: ShortArray, readSize: Int) {
-        if (sosTriggered) return
+    @Synchronized
+    private fun stopAudioCapture() {
+        isRecording = false
+        recordingThread?.interrupt()
+        recordingThread = null
 
-        val codeWordDetected = voskKeywordDetector?.processAudio(buffer, readSize) == true
-        val voskText = voskKeywordDetector?.getLatestHypothesis()?.lowercase() ?: ""
+        try {
+            audioRecord?.stop()
+        } catch (_: Exception) {}
+        try {
+            audioRecord?.release()
+        } catch (_: Exception) {}
+        audioRecord = null
 
-        var customMatched = false
-        synchronized(dynamicCustomCodes) {
-            if (dynamicCustomCodes.isNotEmpty() && voskText.isNotEmpty()) {
-                customMatched = dynamicCustomCodes.any { code -> voskText.contains(code) }
-            }
-        }
-
-        if (codeWordDetected || customMatched) {
-            val triggerLabel = if (customMatched) "CUSTOM_SECRET_CODE" else "CODE_WORD"
-            val finalSignals = (observedEvents + triggerLabel).toList()
-            sosTriggered = true
-            dispatchDistressAlert(score = 1.0, signals = finalSignals)
-            stopMonitoring()
-            return
-        }
-
-        var sumSquares = 0.0
-        for (i in 0 until readSize) {
-            sumSquares += buffer[i] * buffer[i]
-        }
-        val rms = sqrt(sumSquares / readSize)
-
-        var zeroCrossings = 0
-        for (i in 1 until readSize) {
-            if ((buffer[i] >= 0 && buffer[i - 1] < 0) || (buffer[i] < 0 && buffer[i - 1] >= 0)) {
-                zeroCrossings++
-            }
-        }
-        val zcr = zeroCrossings.toDouble() / readSize
-
-        var silenceSignal = false
-        if (rms < 200.0) {
-            consecutiveSilenceFrames++
-            if (consecutiveSilenceFrames >= silenceThresholdFrames) {
-                silenceSignal = true
-            }
-        } else {
-            consecutiveSilenceFrames = 0
-        }
-
-        if (rms > 5000.0 && zcr > 0.05) {
-            consecutiveStressFrames++
-        } else {
-            consecutiveStressFrames = maxOf(0, consecutiveStressFrames - 1)
-        }
-        val stressSignal = consecutiveStressFrames >= stressThresholdFrames
-
-        logThrottle++
-        if (logThrottle % 10 == 0) {
-            Log.d(TAG, "Mic -> RMS: ${rms.toInt()} | ZCR: ${String.format("%.3f", zcr)} | Silence: $consecutiveSilenceFrames | Stress: $consecutiveStressFrames")
-        }
-
-        if (stressSignal) registerDistressEvent("VOCAL_STRESS_SPIKE")
-        if (silenceSignal) registerDistressEvent("ABNORMAL_SILENCE_FREEZE")
-    }
-
-    private fun registerDistressEvent(event: String) {
-        if (sosTriggered) return
-        if (!observedEvents.add(event)) return
-
-        if (observedEvents.size >= 2) {
-            sosTriggered = true
-            dispatchDistressAlert(score = 1.0, signals = observedEvents.toList())
-            stopMonitoring()
-        }
+        audioEnhanceManager.release()
+        Log.i(TAG, "Audio capture pipeline stopped.")
     }
 
     @SuppressLint("MissingPermission")
-    private fun getBestLastKnownLocation(): Location? {
-        return try {
-            val locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
-            val providers = locationManager.getProviders(true)
-            var bestLocation: Location? = null
+    private fun triggerEmergencyAlert(matchedWord: String, fullHypothesis: String) {
+        val fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
 
-            for (provider in providers) {
-                val l = locationManager.getLastKnownLocation(provider) ?: continue
-                if (bestLocation == null || l.accuracy < bestLocation.accuracy) {
-                    bestLocation = l
+        try {
+            fusedLocationClient.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, null)
+                .addOnSuccessListener { location ->
+                    val lat = location?.latitude ?: 0.0
+                    val lng = location?.longitude ?: 0.0
+                    dispatchEmergencyEvent(matchedWord, fullHypothesis, lat, lng)
+                    fetchAndSendEmergencySms(matchedWord, lat, lng)
                 }
-            }
-            bestLocation
+                .addOnFailureListener {
+                    dispatchEmergencyEvent(matchedWord, fullHypothesis, 0.0, 0.0)
+                    fetchAndSendEmergencySms(matchedWord, 0.0, 0.0)
+                }
         } catch (e: Exception) {
-            Log.w(TAG, "Unable to obtain device location: ${e.message}")
-            null
+            Log.e(TAG, "Location query failed: ${e.message}")
+            dispatchEmergencyEvent(matchedWord, fullHypothesis, 0.0, 0.0)
+            fetchAndSendEmergencySms(matchedWord, 0.0, 0.0)
         }
     }
 
-    private fun dispatchDistressAlert(score: Double, signals: List<String>) {
-        Log.w(TAG, "EMERGENCY DETECTED! Composite Score: $score | Triggers: $signals")
+    private fun dispatchEmergencyEvent(word: String, contextText: String, lat: Double, lng: Double) {
+        thread(start = true, name = "AlertDispatchWorker") {
+            val prefs = applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val deviceUuid = prefs.getString(KEY_DEVICE_UUID, "UNKNOWN_DEVICE") ?: "UNKNOWN_DEVICE"
 
-        val prefs = applicationContext.getSharedPreferences("VoicePulsePrefs", Context.MODE_PRIVATE)
-        val deviceUuid = prefs.getString("device_uuid", "UNKNOWN_DEVICE") ?: "UNKNOWN_DEVICE"
-        val location = getBestLastKnownLocation()
-
-        thread {
-            val phoneNumbersToSend = mutableListOf<String>()
-
-            // 1. Fetch Emergency Contacts
             try {
-                val contactsEndpoint = URL("https://voice-pulse-backend.onrender.com/api/contacts")
-                val conn = contactsEndpoint.openConnection() as HttpURLConnection
-                conn.requestMethod = "GET"
-                conn.connectTimeout = 8000
-                conn.readTimeout = 8000
-
-                if (conn.responseCode in 200..299) {
-                    val responseText = conn.inputStream.bufferedReader().use { it.readText() }
-                    val contactsArray = JSONArray(responseText)
-
-                    for (i in 0 until contactsArray.length()) {
-                        val obj = contactsArray.getJSONObject(i)
-                        var phone = obj.optString("phone", "").trim()
-                        if (phone.isEmpty()) {
-                            phone = obj.optString("phoneNumber", "").trim()
-                        }
-
-                        val isAlertEnabled = obj.optBoolean("emergencyAlerts", true)
-
-                        if (phone.isNotEmpty() && !phone.equals("null", ignoreCase = true) && isAlertEnabled) {
-                            if (!phoneNumbersToSend.contains(phone)) {
-                                phoneNumbersToSend.add(phone)
-                            }
-                        }
-                    }
-                    Log.d(TAG, "Fetched ${phoneNumbersToSend.size} contact(s) from database: $phoneNumbersToSend")
-                } else {
-                    Log.e(TAG, "Failed to fetch contacts, HTTP code: ${conn.responseCode}")
-                }
-                conn.disconnect()
-            } catch (e: Exception) {
-                Log.e(TAG, "Error fetching database contacts: ${e.message}")
-            }
-
-            // 2. Submit Alert to Backend with Location and Receive shareToken
-            var shareToken: String? = null
-            try {
-                val url = URL(serverUrl)
+                val url = URL("$BACKEND_URL/api/alerts/trigger")
                 val conn = url.openConnection() as HttpURLConnection
                 conn.requestMethod = "POST"
                 conn.setRequestProperty("Content-Type", "application/json")
@@ -341,103 +226,127 @@ class DistressDetectionService : AccessibilityService() {
 
                 val payload = JSONObject().apply {
                     put("deviceUuid", deviceUuid)
+                    put("triggerWord", word)
+                    put("transcript", contextText)
+                    put("latitude", lat)
+                    put("longitude", lng)
                     put("timestamp", System.currentTimeMillis())
-                    put("score", score)
-                    put("signals", JSONArray(signals))
-                    if (location != null) {
-                        put("latitude", location.latitude)
-                        put("longitude", location.longitude)
-                        put("locationAccuracy", location.accuracy)
-                    }
                 }
 
-                OutputStreamWriter(conn.outputStream).use { writer ->
-                    writer.write(payload.toString())
-                    writer.flush()
-                }
+                OutputStreamWriter(conn.outputStream).use { it.write(payload.toString()) }
 
                 val responseCode = conn.responseCode
-                Log.d(TAG, "Server alert ingestion code: $responseCode")
-
-                if (responseCode in 200..299) {
-                    val responseStr = conn.inputStream.bufferedReader().use { it.readText() }
-                    val resJson = JSONObject(responseStr)
-                    shareToken = resJson.optString("shareToken", null)
-                }
-                conn.disconnect()
+                Log.i(TAG, "Emergency alert POST completed with response code: $responseCode")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to submit HTTP alert: ${e.message}")
+                Log.e(TAG, "Failed to POST emergency alert to backend: ${e.message}", e)
             }
+        }
+    }
 
-            // 3. Build SMS URL with deviceToken and alertToken, then Dispatch SMS
-            val dashboardUrl = if (!shareToken.isNullOrEmpty()) {
-                "$frontendBaseUrl/?deviceToken=$deviceUuid&alertToken=$shareToken"
-            } else {
-                "$frontendBaseUrl/?deviceToken=$deviceUuid"
-            }
+    /**
+     * Fetches contacts scoped to this device UUID and sends distress SMS.
+     */
+    private fun fetchAndSendEmergencySms(triggerWord: String, lat: Double, lng: Double) {
+        thread(start = true, name = "EmergencySmsWorker") {
+            val prefs = applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val deviceUuid = prefs.getString(KEY_DEVICE_UUID, null) ?: return@thread
 
-            val alertMessage = "EMERGENCY: Distress detected by VoicePulse! Triggers: ${signals.joinToString(", ")}. View live dashboard & location: $dashboardUrl"
+            try {
+                val url = URL("$BACKEND_URL/api/users/device/$deviceUuid/contacts")
+                val conn = url.openConnection() as HttpURLConnection
+                conn.requestMethod = "GET"
+                conn.connectTimeout = 5000
+                conn.readTimeout = 5000
 
-            if (phoneNumbersToSend.isNotEmpty()) {
-                try {
-                    val smsManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+                    val response = BufferedReader(InputStreamReader(conn.inputStream)).use { it.readText() }
+                    val contactsArray = JSONArray(response)
+                    val phoneNumbers = mutableListOf<String>()
+
+                    for (i in 0 until contactsArray.length()) {
+                        val contactObj = contactsArray.getJSONObject(i)
+                        val alertsEnabled = contactObj.optBoolean("emergencyAlerts", true)
+                        val phone = contactObj.optString("phone", "").trim()
+                        if (alertsEnabled && phone.isNotEmpty()) {
+                            phoneNumbers.add(phone)
+                        }
+                    }
+
+                    if (phoneNumbers.isEmpty()) {
+                        Log.w(TAG, "No emergency contacts found for device $deviceUuid")
+                        return@thread
+                    }
+
+                    val locationPart = if (lat != 0.0 || lng != 0.0) {
+                        "\nLocation: https://maps.google.com/?q=$lat,$lng"
+                    } else {
+                        ""
+                    }
+
+                    val smsBody = "EMERGENCY SOS: A distress signal was triggered ('$triggerWord'). Please check on me.$locationPart"
+
+                    val smsManager: SmsManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                         applicationContext.getSystemService(SmsManager::class.java)
                     } else {
-                        @Suppress("DEPRECATION")
                         SmsManager.getDefault()
                     }
 
-                    for (phone in phoneNumbersToSend) {
+                    for (phoneNumber in phoneNumbers) {
                         try {
-                            smsManager.sendTextMessage(phone, null, alertMessage, null, null)
-                            Log.d(TAG, "Emergency SMS dispatched to: $phone")
+                            val parts = smsManager.divideMessage(smsBody)
+                            smsManager.sendMultipartTextMessage(phoneNumber, null, parts, null, null)
+                            Log.i(TAG, "Emergency SMS dispatched to: $phoneNumber")
                         } catch (smsEx: Exception) {
-                            Log.e(TAG, "Failed sending SMS to $phone: ${smsEx.message}")
+                            Log.e(TAG, "Failed sending SMS to $phoneNumber: ${smsEx.message}", smsEx)
                         }
                     }
-                } catch (e: Exception) {
-                    Log.e(TAG, "SMS Manager error: ${e.message}")
+                } else {
+                    Log.w(TAG, "Failed to retrieve contacts for SMS: HTTP ${conn.responseCode}")
                 }
-            } else {
-                Log.w(TAG, "No contacts found in database. Skipping SMS transmission.")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error during emergency SMS pipeline: ${e.message}", e)
             }
         }
     }
 
-    private fun stopMonitoring() {
-        isRecording = false
-        try {
-            val audioManager = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
-            audioManager.mode = android.media.AudioManager.MODE_NORMAL
-            audioRecord?.stop()
-            audioRecord?.release()
-        } catch (_: Exception) {}
-        audioRecord = null
+    private fun fetchCustomSecretCodes() {
+        val prefs = applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val deviceUuid = prefs.getString(KEY_DEVICE_UUID, null) ?: return
 
         try {
-            voskKeywordDetector?.close()
-        } catch (_: Exception) {}
-        voskKeywordDetector = null
-    }
+            val url = URL("$BACKEND_URL/api/config/secret-codes?deviceUuid=$deviceUuid")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "GET"
+            conn.connectTimeout = 5000
+            conn.readTimeout = 5000
 
-    private fun unregisterCallStateListener() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            (telephonyCallback as? TelephonyCallback)?.let {
-                telephonyManager?.unregisterTelephonyCallback(it)
+            if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+                val response = BufferedReader(InputStreamReader(conn.inputStream)).use { it.readText() }
+                val json = JSONObject(response)
+                val codesArray: JSONArray = json.optJSONArray("secretCodes") ?: JSONArray()
+
+                val customWords = mutableListOf<String>()
+                for (i in 0 until codesArray.length()) {
+                    customWords.add(codesArray.getString(i))
+                }
+
+                if (customWords.isNotEmpty()) {
+                    voskDetector.updateCustomCodewords(customWords)
+                    Log.i(TAG, "Loaded custom secret trigger words: $customWords")
+                }
             }
-        } else {
-            legacyPhoneStateListener?.let {
-                @Suppress("DEPRECATION")
-                telephonyManager?.listen(it, PhoneStateListener.LISTEN_NONE)
-            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not sync custom secret codes: ${e.message}")
         }
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
-    override fun onInterrupt() { stopMonitoring() }
     override fun onDestroy() {
         super.onDestroy()
-        stopMonitoring()
-        unregisterCallStateListener()
+        stopAudioCapture()
+        voskDetector.close()
+        contextEngine.close()
+
+        telephonyManager?.listen(phoneStateListener, PhoneStateListener.LISTEN_NONE)
+        Log.i(TAG, "DistressDetectionService destroyed.")
     }
 }

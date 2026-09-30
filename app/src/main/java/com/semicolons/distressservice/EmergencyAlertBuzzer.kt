@@ -6,231 +6,67 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
 import android.util.Log
+import kotlin.concurrent.thread
 import kotlin.math.PI
 import kotlin.math.sin
 
 object EmergencyAlertBuzzer {
 
-    private const val TAG =
-        "EmergencyAlertBuzzer"
+    private const val TAG = "EmergencyAlertBuzzer"
 
     fun playGovernmentAlertTone(
         context: Context,
         durationSeconds: Double = 6.0
     ) {
+        thread(start = true, isDaemon = true, name = "AlertToneThread") {
+            executePlayback(context, durationSeconds)
+        }
+    }
 
-        Log.w(
-            TAG,
-            "========================================"
-        )
-
-        Log.w(
-            TAG,
-            "BUZZER FUNCTION ENTERED"
-        )
-
-        Log.w(
-            TAG,
-            "Requested duration = ${durationSeconds}s"
-        )
-
-        Log.w(
-            TAG,
-            "========================================"
-        )
+    private fun executePlayback(context: Context, durationSeconds: Double) {
+        Log.w(TAG, "Entering emergency buzzer tone generator (duration=${durationSeconds}s)")
 
         val sampleRate = 44100
-
         val beepFrequency1 = 853.0
         val beepFrequency2 = 960.0
-
         val beepDuration = 0.45
         val pauseDuration = 0.20
+        val amplitude = 0.85
 
-        val amplitude = 0.75
+        val totalSamples = (sampleRate * durationSeconds).toInt()
+        val pcmData = ShortArray(totalSamples)
 
-        val totalSamples =
-            (sampleRate * durationSeconds)
-                .toInt()
+        val beepSamples = (sampleRate * beepDuration).toInt()
+        val pauseSamples = (sampleRate * pauseDuration).toInt()
+        val cycleSamples = beepSamples + pauseSamples
 
-        Log.d(
-            TAG,
-            "Sample rate = $sampleRate"
-        )
-
-        Log.d(
-            TAG,
-            "Total samples = $totalSamples"
-        )
-
-        Log.d(
-            TAG,
-            "Frequency 1 = $beepFrequency1 Hz"
-        )
-
-        Log.d(
-            TAG,
-            "Frequency 2 = $beepFrequency2 Hz"
-        )
-
-        Log.d(
-            TAG,
-            "Beep duration = ${beepDuration}s"
-        )
-
-        Log.d(
-            TAG,
-            "Pause duration = ${pauseDuration}s"
-        )
-
-        // ========================================================
-        // GENERATE PCM
-        // ========================================================
-
-        val pcmData =
-            ShortArray(totalSamples)
-
-        val beepSamples =
-            (sampleRate * beepDuration)
-                .toInt()
-
-        val pauseSamples =
-            (sampleRate * pauseDuration)
-                .toInt()
-
-        val cycleSamples =
-            beepSamples + pauseSamples
-
-        var beepNumber = 0
-
-        Log.d(
-            TAG,
-            "Generating PCM audio data..."
-        )
-
-        for (
-        sampleIndex in 0 until totalSamples
-        ) {
-
-            val cyclePosition =
-                sampleIndex % cycleSamples
-
-            if (
-                cyclePosition < beepSamples
-            ) {
-
-                val time =
-                    sampleIndex.toDouble() / sampleRate
-
-                val sample =
-                    (
-                            (
-                                    sin(
-                                        2.0 *
-                                                PI *
-                                                beepFrequency1 *
-                                                time
-                                    ) +
-                                            sin(
-                                                2.0 *
-                                                        PI *
-                                                        beepFrequency2 *
-                                                        time
-                                            )
-                                    ) *
-                                    amplitude *
-                                    Short.MAX_VALUE
-                            )
-                        .toInt()
-                        .coerceIn(
-                            Short.MIN_VALUE.toInt(),
-                            Short.MAX_VALUE.toInt()
-                        )
-                        .toShort()
-
-                pcmData[sampleIndex] =
-                    sample
-
-                if (cyclePosition == 0) {
-
-                    beepNumber++
-
-                    Log.d(
-                        TAG,
-                        "Generating beep #$beepNumber"
-                    )
-                }
-
+        for (sampleIndex in 0 until totalSamples) {
+            val cyclePosition = sampleIndex % cycleSamples
+            if (cyclePosition < beepSamples) {
+                val time = sampleIndex.toDouble() / sampleRate
+                val rawSample = (sin(2.0 * PI * beepFrequency1 * time) + sin(2.0 * PI * beepFrequency2 * time)) * amplitude * Short.MAX_VALUE
+                pcmData[sampleIndex] = rawSample.toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
             } else {
-
                 pcmData[sampleIndex] = 0
             }
         }
 
-        Log.d(
-            TAG,
-            "PCM generation finished."
-        )
+        val audioAttributes = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_ALARM)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .build()
 
-        Log.d(
-            TAG,
-            "Generated $beepNumber beeps."
-        )
+        val audioFormat = AudioFormat.Builder()
+            .setSampleRate(sampleRate)
+            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+            .build()
 
-        // ========================================================
-        // AUDIO ATTRIBUTES
-        // ========================================================
+        val requiredBufferSize = pcmData.size * 2
+        var audioTrack: AudioTrack? = null
 
-        val audioAttributes =
-            AudioAttributes.Builder()
-                .setUsage(
-                    AudioAttributes.USAGE_ALARM
-                )
-                .setContentType(
-                    AudioAttributes.CONTENT_TYPE_SONIFICATION
-                )
-                .build()
-
-        // ========================================================
-        // AUDIO FORMAT
-        // ========================================================
-
-        val audioFormat =
-            AudioFormat.Builder()
-                .setSampleRate(sampleRate)
-                .setEncoding(
-                    AudioFormat.ENCODING_PCM_16BIT
-                )
-                .setChannelMask(
-                    AudioFormat.CHANNEL_OUT_MONO
-                )
-                .build()
-
-        // ========================================================
-        // BUFFER
-        // ========================================================
-
-        val minBufferSize =
-            AudioTrack.getMinBufferSize(
-                sampleRate,
-                AudioFormat.CHANNEL_OUT_MONO,
-                AudioFormat.ENCODING_PCM_16BIT
-            )
-
-        Log.d(
-            TAG,
-            "Minimum AudioTrack buffer size = $minBufferSize"
-        )
-
-        val requiredBufferSize =
-            pcmData.size * 2
-
-        // ========================================================
-        // AUDIO TRACK
-        // ========================================================
-
-        val audioTrack =
-            AudioTrack(
+        try {
+            audioTrack = AudioTrack(
                 audioAttributes,
                 audioFormat,
                 requiredBufferSize,
@@ -238,142 +74,45 @@ object EmergencyAlertBuzzer {
                 AudioManager.AUDIO_SESSION_ID_GENERATE
             )
 
-        Log.d(
-            TAG,
-            "AudioTrack state = ${audioTrack.state}"
-        )
-
-        /*
-         * IMPORTANT:
-         *
-         * MODE_STATIC can initially report
-         * STATE_NO_STATIC_DATA (2).
-         *
-         * That is expected before PCM data is written.
-         *
-         * Only STATE_UNINITIALIZED means initialization failed.
-         */
-
-        if (
-            audioTrack.state ==
-            AudioTrack.STATE_UNINITIALIZED
-        ) {
-
-            Log.e(
-                TAG,
-                "AudioTrack failed to initialize."
-            )
-
-            audioTrack.release()
-
-            return
-        }
-
-        // ========================================================
-        // WRITE PCM DATA
-        // ========================================================
-
-        val written =
-            audioTrack.write(
-                pcmData,
-                0,
-                pcmData.size
-            )
-
-        Log.d(
-            TAG,
-            "AudioTrack.write() returned $written"
-        )
-
-        if (written < 0) {
-
-            Log.e(
-                TAG,
-                "AudioTrack.write() failed."
-            )
-
-            audioTrack.release()
-
-            return
-        }
-
-        // ========================================================
-        // MAXIMIZE ALARM VOLUME
-        // ========================================================
-
-        try {
-
-            val audioManager =
-                context.getSystemService(
-                    Context.AUDIO_SERVICE
-                ) as AudioManager
-
-            val maxAlarmVolume =
-                audioManager.getStreamMaxVolume(
-                    AudioManager.STREAM_ALARM
-                )
-
-            audioManager.setStreamVolume(
-                AudioManager.STREAM_ALARM,
-                maxAlarmVolume,
-                0
-            )
-
-            Log.d(
-                TAG,
-                "Alarm volume set to maximum."
-            )
-
-        } catch (e: Exception) {
-
-            Log.e(
-                TAG,
-                "Could not set alarm volume: ${e.message}"
-            )
-        }
-
-        // ========================================================
-        // PLAY
-        // ========================================================
-
-        try {
-
-            Log.w(
-                TAG,
-                "Starting emergency alert tone."
-            )
-
-            audioTrack.play()
-
-            Thread.sleep(
-                (durationSeconds * 1000)
-                    .toLong()
-            )
-
-        } catch (
-            e: InterruptedException
-        ) {
-
-            Thread.currentThread().interrupt()
-
-            Log.e(
-                TAG,
-                "Buzzer playback interrupted. ${e.message}"
-            )
-
-        } finally {
-
-            try {
-                audioTrack.stop()
-            } catch (_: Exception) {
+            if (audioTrack.state == AudioTrack.STATE_UNINITIALIZED) {
+                Log.e(TAG, "AudioTrack failed to initialize.")
+                return
             }
 
-            audioTrack.release()
+            val written = audioTrack.write(pcmData, 0, pcmData.size)
+            if (written < 0) {
+                Log.e(TAG, "AudioTrack write failed with code: $written")
+                return
+            }
 
-            Log.w(
-                TAG,
-                "Emergency alert tone finished."
-            )
+            // Maximize alarm stream volume
+            try {
+                val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+                audioManager?.let { am ->
+                    val maxVolume = am.getStreamMaxVolume(AudioManager.STREAM_ALARM)
+                    am.setStreamVolume(AudioManager.STREAM_ALARM, maxVolume, 0)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not adjust alarm volume: ${e.message}")
+            }
+
+            Log.w(TAG, "Playing emergency tone...")
+            audioTrack.play()
+            Thread.sleep((durationSeconds * 1000).toLong())
+
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            Log.w(TAG, "Alert tone playback thread interrupted.")
+        } catch (e: Exception) {
+            Log.e(TAG, "Buzzer execution error: ${e.message}", e)
+        } finally {
+            try {
+                audioTrack?.stop()
+            } catch (_: Exception) {}
+            try {
+                audioTrack?.release()
+            } catch (_: Exception) {}
+            Log.w(TAG, "Emergency alert tone playback concluded.")
         }
     }
 }

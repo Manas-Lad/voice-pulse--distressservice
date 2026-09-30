@@ -30,6 +30,10 @@ android {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
+
+    androidResources {
+        noCompress += "tflite"
+    }
 }
 
 dependencies {
@@ -41,6 +45,9 @@ dependencies {
 
     implementation("com.alphacephei:vosk-android:0.3.75@aar")
     implementation("net.java.dev.jna:jna:5.18.1@aar")
+    implementation("com.google.android.gms:play-services-location:21.3.0")
+
+    implementation("com.google.mediapipe:tasks-text:0.10.14")
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.espresso.core)

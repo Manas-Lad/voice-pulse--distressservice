@@ -7,6 +7,7 @@ import org.vosk.Model
 import org.vosk.Recognizer
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.CopyOnWriteArrayList
 
 class VoskKeywordDetector(
     private val context: Context
@@ -15,11 +16,10 @@ class VoskKeywordDetector(
     companion object {
         private const val TAG = "VoskKeywordDetector"
         private const val SAMPLE_RATE = 16000.0f
-
         private const val MODEL_ASSET_FOLDER = "vosk-model"
         private const val MODEL_DIRECTORY_NAME = "vosk-model"
 
-        private val CODE_WORDS = listOf(
+        private val DEFAULT_CODE_WORDS = listOf(
             "help",
             "emergency",
             "save me",
@@ -29,11 +29,14 @@ class VoskKeywordDetector(
         )
     }
 
+    private val activeCodeWords = CopyOnWriteArrayList<String>(DEFAULT_CODE_WORDS)
     private var model: Model? = null
     private var recognizer: Recognizer? = null
     private var lastRecognizedText: String = ""
-
     private var initialized = false
+
+    // Reusable byte array to prevent garbage collector thrashing in audio loops
+    private var reusableByteChunk = ByteArray(4096)
 
     fun initialize(): Boolean {
         if (initialized) {
@@ -43,83 +46,72 @@ class VoskKeywordDetector(
         return try {
             Log.i(TAG, "Initializing Vosk...")
 
-            val modelDirectory = File(
-                context.filesDir,
-                MODEL_DIRECTORY_NAME
-            )
+            val modelDirectory = File(context.filesDir, MODEL_DIRECTORY_NAME)
 
             if (!modelDirectory.exists()) {
-                Log.i(TAG, "Vosk model not found in internal storage.")
-                Log.i(TAG, "Copying model from assets...")
-
-                copyAssetFolder(
-                    MODEL_ASSET_FOLDER,
-                    modelDirectory
-                )
-
-                Log.i(TAG, "Vosk model copied successfully.")
+                Log.i(TAG, "Vosk model not found in internal storage. Extracting from assets...")
+                copyAssetFolder(MODEL_ASSET_FOLDER, modelDirectory)
+                Log.i(TAG, "Vosk model extracted successfully.")
             } else {
-                Log.i(TAG, "Vosk model already exists in internal storage.")
+                Log.i(TAG, "Vosk model verified in internal storage.")
             }
 
-            Log.i(TAG, "Loading Vosk Model...")
+            Log.i(TAG, "Loading Vosk Model into memory...")
             model = Model(modelDirectory.absolutePath)
 
-            Log.i(TAG, "Creating Vosk Recognizer...")
-            recognizer = Recognizer(
-                model,
-                SAMPLE_RATE
-            )
+            Log.i(TAG, "Constructing Vosk Recognizer...")
+            recognizer = Recognizer(model, SAMPLE_RATE)
 
             initialized = true
-
-            Log.i(TAG, "========================================")
-            Log.i(TAG, "VOSK INITIALIZED SUCCESSFULLY")
-            Log.i(TAG, "Sample rate = $SAMPLE_RATE Hz")
-            Log.i(TAG, "Code words = $CODE_WORDS")
-            Log.i(TAG, "========================================")
-
+            Log.i(TAG, "Vosk engine ready. Active codewords: $activeCodeWords")
             true
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to initialize Vosk", e)
+            Log.e(TAG, "Failed to initialize Vosk engine: ${e.message}", e)
             close()
             false
         }
     }
 
-    fun processAudio(
-        audioBuffer: ShortArray,
-        length: Int
-    ): Boolean {
-        if (!initialized) {
-            Log.w(TAG, "processAudio() called before Vosk initialization.")
-            return false
-        }
+    fun updateCustomCodewords(newWords: List<String>) {
+        val sanitized = newWords.map { it.trim().lowercase() }.filter { it.isNotEmpty() }
+        activeCodeWords.clear()
+        activeCodeWords.addAll(DEFAULT_CODE_WORDS)
+        activeCodeWords.addAll(sanitized)
+        Log.i(TAG, "Updated active codewords: $activeCodeWords")
+    }
 
-        if (length <= 0) {
-            return false
+    data class DetectionResult(
+        val triggered: Boolean,
+        val matchedWord: String = "",
+        val fullSentence: String = ""
+    )
+
+    fun processAudio(audioBuffer: ShortArray, length: Int): DetectionResult {
+        if (!initialized || length <= 0) {
+            return DetectionResult(triggered = false)
         }
 
         return try {
-            val recognizerInstance = recognizer ?: return false
-            val audioBytes = ByteArray(length * 2)
+            val recognizerInstance = recognizer ?: return DetectionResult(triggered = false)
+            val byteCount = length * 2
+
+            if (reusableByteChunk.size < byteCount) {
+                reusableByteChunk = ByteArray(byteCount)
+            }
 
             for (i in 0 until length) {
                 val sample = audioBuffer[i].toInt()
-                audioBytes[i * 2] = (sample and 0xFF).toByte()
-                audioBytes[i * 2 + 1] = ((sample shr 8) and 0xFF).toByte()
+                reusableByteChunk[i * 2] = (sample and 0xFF).toByte()
+                reusableByteChunk[i * 2 + 1] = ((sample shr 8) and 0xFF).toByte()
             }
 
-            val accepted = recognizerInstance.acceptWaveForm(
-                audioBytes,
-                audioBytes.size
-            )
+            val accepted = recognizerInstance.acceptWaveForm(reusableByteChunk, byteCount)
 
             if (accepted) {
                 val resultJson = recognizerInstance.result
                 return processRecognitionResult(resultJson)
             } else {
-                // Update live partial hypothesis while user is in mid-sentence
+                // Read partial result non-blockingly
                 try {
                     val partialJson = JSONObject(recognizerInstance.partialResult)
                     val partial = partialJson.optString("partial", "").lowercase().trim()
@@ -129,54 +121,44 @@ class VoskKeywordDetector(
                 } catch (_: Exception) {}
             }
 
-            return false
+            DetectionResult(triggered = false)
         } catch (e: Exception) {
-            Log.e(TAG, "Error processing Vosk audio", e)
-            false
+            Log.e(TAG, "Error evaluating audio buffer in Vosk: ${e.message}", e)
+            DetectionResult(triggered = false)
         }
     }
 
-    private fun processRecognitionResult(
-        resultJson: String
-    ): Boolean {
+    private fun processRecognitionResult(resultJson: String): DetectionResult {
         return try {
-            Log.d(TAG, "Vosk result = $resultJson")
-
             val json = JSONObject(resultJson)
-            val recognizedText = json.optString("text", "")
-                .lowercase()
-                .trim()
+            val recognizedText = json.optString("text", "").lowercase().trim()
 
-            // Store the finalized hypothesis
             lastRecognizedText = recognizedText
-
             if (recognizedText.isEmpty()) {
-                return false
+                return DetectionResult(triggered = false)
             }
 
-            Log.i(TAG, "Recognized text: \"$recognizedText\"")
+            Log.i(TAG, "Vosk recognized hypothesis: \"$recognizedText\"")
 
-            for (codeWord in CODE_WORDS) {
+            for (codeWord in activeCodeWords) {
                 if (recognizedText.contains(codeWord)) {
-                    Log.w(TAG, "========================================")
-                    Log.w(TAG, "CODE WORD DETECTED: \"$codeWord\"")
-                    Log.w(TAG, "Recognized text: \"$recognizedText\"")
-                    Log.w(TAG, "========================================")
-                    return true
+                    Log.w(TAG, "Codeword candidate detected: \"$codeWord\" in sentence: \"$recognizedText\"")
+                    return DetectionResult(
+                        triggered = true,
+                        matchedWord = codeWord,
+                        fullSentence = recognizedText
+                    )
                 }
             }
 
-            false
+            DetectionResult(triggered = false, fullSentence = recognizedText)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to process Vosk result", e)
-            false
+            Log.e(TAG, "Failed to parse Vosk recognition JSON: ${e.message}", e)
+            DetectionResult(triggered = false)
         }
     }
 
-    private fun copyAssetFolder(
-        assetPath: String,
-        destination: File
-    ) {
+    private fun copyAssetFolder(assetPath: String, destination: File) {
         val assetManager = context.assets
         val files = assetManager.list(assetPath)
             ?: throw IllegalStateException("Unable to read asset folder: $assetPath")
@@ -196,9 +178,8 @@ class VoskKeywordDetector(
                 assetManager.open(sourcePath).use { input ->
                     FileOutputStream(destinationFile).use { output ->
                         val buffer = ByteArray(8192)
-                        while (true) {
-                            val bytesRead = input.read(buffer)
-                            if (bytesRead == -1) break
+                        var bytesRead: Int
+                        while (input.read(buffer).also { bytesRead = it } != -1) {
                             output.write(buffer, 0, bytesRead)
                         }
                     }
@@ -207,28 +188,24 @@ class VoskKeywordDetector(
         }
     }
 
+    fun getLatestHypothesis(): String = lastRecognizedText
+
     fun close() {
         try {
             recognizer?.close()
         } catch (e: Exception) {
-            Log.e(TAG, "Error closing recognizer", e)
+            Log.e(TAG, "Error closing Vosk recognizer: ${e.message}")
         }
-
         try {
             model?.close()
         } catch (e: Exception) {
-            Log.e(TAG, "Error closing model", e)
+            Log.e(TAG, "Error closing Vosk model: ${e.message}")
         }
 
         recognizer = null
         model = null
         initialized = false
         lastRecognizedText = ""
-
-        Log.i(TAG, "Vosk resources released.")
-    }
-
-    fun getLatestHypothesis(): String {
-        return lastRecognizedText
+        Log.i(TAG, "Vosk Keyword Detector successfully released.")
     }
 }

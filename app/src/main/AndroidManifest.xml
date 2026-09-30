@@ -1,111 +1,80 @@
 <?xml version="1.0" encoding="utf-8"?>
-
-<manifest
-    xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- ====================================================== -->
-    <!-- PERMISSIONS -->
+    <!-- HARDWARE & AUDIO PERMISSIONS -->
     <!-- ====================================================== -->
-
-    <uses-permission
-        android:name="android.permission.RECORD_AUDIO" />
-
-    <uses-permission
-        android:name="android.permission.READ_PHONE_STATE" />
-
-    <uses-permission
-        android:name="android.permission.INTERNET" />
-
-    <uses-permission
-        android:name="android.permission.SEND_SMS" />
-
-    <uses-permission
-        android:name="android.permission.RECEIVE_SMS" />
-
-    <uses-permission
-        android:name="android.permission.WAKE_LOCK" />
-
-    <uses-permission
-        android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
-
-    <uses-permission
-        android:name="android.permission.ACCESS_FINE_LOCATION" />
-
-    <uses-permission
-        android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- ====================================================== -->
-    <!-- APPLICATION -->
+    <!-- TELEPHONY & SMS PERMISSIONS -->
     <!-- ====================================================== -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+
+    <!-- ====================================================== -->
+    <!-- LOCATION PERMISSIONS -->
+    <!-- ====================================================== -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+
+    <!-- ====================================================== -->
+    <!-- NETWORK PERMISSIONS -->
+    <!-- ====================================================== -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- ====================================================== -->
+    <!-- FOREGROUND SERVICE & NOTIFICATIONS (Android 13/14+) -->
+    <!-- ====================================================== -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 
     <application
         android:allowBackup="true"
         android:label="@string/app_name"
         android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
         android:theme="@style/Theme.TestApplication">
 
-        <!-- ================================================== -->
-        <!-- MAIN ACTIVITY -->
-        <!-- ================================================== -->
-
+        <!-- MAIN ENTRY ACTIVITY -->
         <activity
             android:name=".MainActivity"
             android:exported="true">
-
             <intent-filter>
-
-                <action
-                    android:name="android.intent.action.MAIN" />
-
-                <category
-                    android:name="android.intent.category.LAUNCHER" />
-
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-
         </activity>
 
-        <!-- ================================================== -->
-        <!-- ACCESSIBILITY SERVICE -->
-        <!-- ================================================== -->
-
+        <!-- DISTRESS DETECTION ACCESSIBILITY SERVICE -->
         <service
             android:name=".DistressDetectionService"
-
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
-
+            android:foregroundServiceType="microphone"
             android:exported="true">
-
             <intent-filter>
-
                 <action android:name="android.accessibilityservice.AccessibilityService" />
-
             </intent-filter>
 
             <meta-data
                 android:name="android.accessibilityservice"
-
                 android:resource="@xml/accessibility_service_config" />
-
         </service>
 
-        <!-- ================================================== -->
-        <!-- EMERGENCY SMS RECEIVER -->
-        <!-- ================================================== -->
-
+        <!-- EMERGENCY BROADCAST RECEIVER -->
         <receiver
-
             android:name=".EmergencySmsReceiver"
-
-            android:exported="true"
-
-            android:permission="android.permission.BROADCAST_SMS">
-
+            android:permission="android.permission.BROADCAST_SMS"
+            android:exported="true">
             <intent-filter android:priority="999">
-
                 <action android:name="android.provider.Telephony.SMS_RECEIVED" />
-
             </intent-filter>
-
         </receiver>
 
     </application>
