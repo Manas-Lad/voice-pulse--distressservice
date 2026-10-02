@@ -29,9 +29,9 @@ object EmergencyAlertBuzzer {
         val sampleRate = 44100
         val beepFrequency1 = 853.0
         val beepFrequency2 = 960.0
-        val beepDuration = 1
-        val pauseDuration = 0.5
-        val amplitude = 1
+        val beepDuration = 0.45
+        val pauseDuration = 0.20
+        val amplitude = 0.85
 
         val totalSamples = (sampleRate * durationSeconds).toInt()
         val pcmData = ShortArray(totalSamples)
